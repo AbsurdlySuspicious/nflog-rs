@@ -324,7 +324,12 @@ impl Queue {
         })
     }
 
+    pub fn handler(&self) -> Handler {
+        Handler::new(self)
+    }
+
     /// Runs an infinite loop, waiting for packets and triggering the callback.
+    /// Panics on any recv error
     pub fn run_loop(&self) -> ! {
         let fd = self.fd();
         let mut buf = vec![0u8; 0x10000];
@@ -351,6 +356,54 @@ impl Queue {
 impl Drop for Queue {
     fn drop(&mut self) {
         unsafe { nflog_close(self.handle.as_ptr()) };
+    }
+}
+
+#[derive(Debug)]
+pub enum HandlerError {
+    Recv(io::Error),
+    Handle,
+}
+
+#[derive(Debug)]
+pub struct Handler<'a> {
+    buffer: Vec<u8>,
+    queue: &'a Queue,
+    fd: RawFd,
+}
+
+impl Handler<'_> {
+    fn new(q: &Queue) -> Handler {
+        Handler {
+            buffer: vec![0; 0x10000],
+            fd: q.fd(),
+            queue: q,
+        }
+    }
+
+    pub fn handle_next(&mut self) -> Result<(), HandlerError> {
+        let buf_ptr = self.buffer.as_mut_ptr() as *mut libc::c_void;
+        let (buf_len, fd) = (self.buffer.len() as libc::size_t, self.fd);
+
+        let rc = unsafe {
+            libc::recv(fd, buf_ptr, buf_len, 0)
+        };
+        if rc < 0 {
+            return Err(HandlerError::Recv(io::Error::last_os_error()));
+        };
+
+        let rc = unsafe {
+            nflog_handle_packet(
+                self.queue.handle.as_ptr(),
+                buf_ptr as *mut libc::c_char,
+                rc as libc::c_int,
+            )
+        };
+        if rc < 0 {
+            return Err(HandlerError::Handle);
+        }
+
+        Ok(())
     }
 }
 
